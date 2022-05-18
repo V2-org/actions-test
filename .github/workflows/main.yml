@@ -1,0 +1,148 @@
+on:
+  push:
+  workflow_dispatch:
+  
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        token: ['${INVALID_TOKEN}', '${NO_SCOPE_TOKEN}', '${READ_PACKAGES_TOKEN}','${READ_WRITE_PACKAGES_TOKEN}', '${GITHUB_TOKEN}' ]
+
+    env:
+      org: ${{ github.repository_owner }}
+      curl_custom_flags: "--fail"
+      GITHUB_API_BASE_URL: https://api.github.com
+      GITHUB_APIV4_BASE_URL: https://api.github.com/graphql
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      READ_PACKAGES_TOKEN: ${{ secrets.READ_PACKAGES_TOKEN }}
+      READ_WRITE_PACKAGES_TOKEN: ${{secrets.READ_WRITE_PACKAGES_TOKEN}}
+      NO_SCOPE_TOKEN: ${{ secrets.NO_SCOPE_TOKEN }}
+      INVALID_TOKEN: ${{ secrets.INVALID_TOKEN }}
+
+    steps:           
+      - uses: actions/checkout@v2
+  
+      - name: list-org-repos
+        id: list-org-repos
+        continue-on-error: true
+        run: |
+          curl ${curl_custom_flags} \
+               -H "Accept: application/vnd.github.v3+json" \
+               -H "Authorization: token ${{ matrix.token }}" \
+                  ${GITHUB_API_BASE_URL}/orgs/${org}/repos
+
+      - name: graphql-list-org-packages
+        id: graphql-list-org-packages
+        continue-on-error: true
+        if: always()
+        run: |
+          graphql_query=graphql_query.txt
+
+          cat <<EOF > $graphql_query
+          {
+            organization(login: "$org") {
+              packages(first: 100) {
+                nodes {
+                  packageType
+                  name
+                  latestVersion {
+                    version
+                  }
+                  repository {
+                    name
+                  }
+                  statistics {
+                    downloadsTotalCount
+                  }
+                }
+                totalCount
+              }
+            }
+          }
+          EOF
+
+          cat >&2 $graphql_query
+
+          json_file=graphql-payload.json
+          rm -f ${json_file}
+
+          jq -n \
+            --arg graphql_query "$(cat $graphql_query)" \
+            '{query: $graphql_query}' > ${json_file}
+
+          curl ${curl_custom_flags} \
+           -H "Accept: application/vnd.github.v3+json" \
+           -H 'Accept: application/vnd.github.audit-log-preview+json' \
+           -H "Authorization: token ${{ matrix.token }}" \
+              ${GITHUB_APIV4_BASE_URL} -d @${json_file} | jq
+
+          rm -f ${graphql_query}
+          rm -f ${json_file}
+         
+         
+      - name: npm-login
+        id: npm-login
+        if: always()
+        continue-on-error: true
+        run: |
+          curl -s  ${curl_custom_flags} \
+          -H "Accept: application/json" \
+          -H "Content-Type:application/json" \
+          -X PUT --data "{\"name\": \"${{ github.actor }}\", \"password\": \"${{ matrix.token }}\"}" \
+          https://npm.pkg.github.com/-/user/org.couchdb.user:${{ github.actor }}
+          
+      - name: npm-install
+        id: npm-install
+        if: always()
+        continue-on-error: true
+        run: |
+          echo "//npm.pkg.github.com/:_authToken=${{ matrix.token }}" > .npmrc
+          npm install --registry=https://npm.pkg.github.com @v2-org/package-without-repo
+          
+      - name: list-org-packages-npm
+        id: list-org-packages-npm
+        continue-on-error: true
+        if: always()
+        run: |
+          package_type=npm
+          curl ${curl_custom_flags} \
+               -H "Accept: application/vnd.github.v3+json" \
+               -H "Authorization: token ${{ matrix.token }}" \
+                  ${GITHUB_API_BASE_URL}/orgs/${org}/packages?package_type=${package_type}
+                  
+      
+      - name: npm-login-beta
+        id: npm-login-beta
+        if: always()
+        continue-on-error: true
+        run: |
+          curl -s  ${curl_custom_flags} \
+          -H "Accept: application/json" \
+          -H "Content-Type:application/json" \
+          -X PUT --data "{\"name\": \"${{ github.actor }}\", \"password\": \"${{ matrix.token }}\"}" \
+          https://npm-beta.pkg.github.com/-/user/org.couchdb.user:${{ github.actor }}
+          
+      - name: npm-install-beta
+        id: npm-install-beta
+        if: always()
+        continue-on-error: true
+        run: |
+          echo "//npm-beta.pkg.github.com/:_authToken=${{ matrix.token }}" > .npmrc
+          npm install --registry=https://npm-beta.pkg.github.com @sanjeev-test-org/samplepackage
+              
+      - name: Job Summary
+        run: |
+          echo "### Observations" >> $GITHUB_STEP_SUMMARY
+          echo "|Test| Result |" >> $GITHUB_STEP_SUMMARY 
+          echo "|----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "|List org repos (REST) | ${{ steps.list-org-repos.outcome }} |" >> $GITHUB_STEP_SUMMARY
+          echo "|List org repos (Graphql) | ${{ steps.graphql-list-org-packages.outcome }} |" >> $GITHUB_STEP_SUMMARY
+          echo "|Npm Login | ${{ steps.npm-login.outcome }} |" >> $GITHUB_STEP_SUMMARY
+          echo "|Npm Install | ${{ steps.npm-install.outcome }} |" >> $GITHUB_STEP_SUMMARY
+          echo "|List Org Packages NPM| ${{ steps.list-org-packages-npm.outcome }} |" >> $GITHUB_STEP_SUMMARY
+          echo "|Npm Login To Beta | ${{ steps.npm-login-beta.outcome }} |" >> $GITHUB_STEP_SUMMARY
+          echo "|Npm Install Beta| ${{ steps.npm-install-beta.outcome }} |" >> $GITHUB_STEP_SUMMARY
+ 
